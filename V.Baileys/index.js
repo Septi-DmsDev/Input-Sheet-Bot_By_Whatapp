@@ -1,4 +1,3 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
@@ -24,6 +23,7 @@ async function safeReact(sock, jid, key, emoji) {
 }
 
 async function connectToWhatsApp() {
+    const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = await import('@whiskeysockets/baileys');
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`🔄 Menggunakan WA v${version.join('.')}, isLatest: ${isLatest}`);
