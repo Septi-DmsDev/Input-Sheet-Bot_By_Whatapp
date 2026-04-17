@@ -13,6 +13,25 @@ const groupNameCache = new Map();
 // ==========================================
 const messageCache = new Map();
 
+// ==========================================
+// 2. SISTEM WATCHDOG (KILL-SWITCH OTOMATIS)
+// ==========================================
+let watchdogTimer = null;
+
+function startWatchdog() {
+    clearTimeout(watchdogTimer);
+    // Jika dalam 3 menit (180.000 ms) bot tidak berstatus 'open', matikan paksa!
+    watchdogTimer = setTimeout(() => {
+        console.error('🚨 [WATCHDOG FATAL] Bot gagal konek/hang terlalu lama. Memaksa restart proses...');
+        process.exit(1); 
+    }, 180000); 
+}
+
+function stopWatchdog() {
+    clearTimeout(watchdogTimer);
+    console.log('🛡️ [WATCHDOG AMAN] Timer kill-switch dihentikan.');
+}
+
 async function safeReact(sock, jid, key, emoji) {
     try {
         await new Promise(resolve => setTimeout(resolve, 1500));
@@ -23,6 +42,9 @@ async function safeReact(sock, jid, key, emoji) {
 }
 
 async function connectToWhatsApp() {
+    // Mulai hitung mundur Watchdog saat booting
+    startWatchdog();
+
     const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = await import('@whiskeysockets/baileys');
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -36,8 +58,12 @@ async function connectToWhatsApp() {
         browser: ['TeknosBot-MVP', 'Chrome', '1.0.0'],
         
         // ==========================================
-        // 2. GET MESSAGE DIAMBIL DARI CUSTOM CACHE
+        // 3. PARAMETER ANTI ZOMBIE CONNECTION
         // ==========================================
+        keepAliveIntervalMs: 10000, // Ping server Meta setiap 10 detik
+        markOnlineOnConnect: true,
+        connectTimeoutMs: 60000,
+        
         getMessage: async (key) => {
             return messageCache.get(key.id) || undefined;
         }
@@ -49,18 +75,24 @@ async function connectToWhatsApp() {
         if (qr) {
             console.log('📲 QR Code muncul, silakan scan!');
             qrcode.generate(qr, { small: true });
+            // Hentikan watchdog agar VPS tidak restart sendiri saat menunggu discan
+            stopWatchdog();
         }
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('⚠️ Koneksi terputus. Reconnect:', shouldReconnect);
             if (shouldReconnect) {
+                // Nyalakan watchdog lagi saat mencoba reconnect
+                startWatchdog();
                 connectToWhatsApp();
             } else {
                 console.log('❌ Sesi logout. Hapus folder "auth_info_baileys" dan scan ulang.');
                 process.exit(1);
             }
         } else if (connection === 'open') {
+            // Matikan watchdog karena koneksi sudah sukses
+            stopWatchdog();
             console.log('✅ Authenticated! Bot siap menerima pesan (Baileys Engine).');
         }
     });
@@ -74,13 +106,11 @@ async function connectToWhatsApp() {
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
 
-        // ==========================================
-        // 3. SIMPAN PESAN KE CACHE (Max 1000 pesan agar RAM ringan)
-        // ==========================================
+        // SIMPAN PESAN KE CACHE
         if (msg.key.id) {
             messageCache.set(msg.key.id, msg.message);
             if (messageCache.size > 1000) {
-                messageCache.delete(messageCache.keys().next().value); // Hapus pesan paling lama
+                messageCache.delete(messageCache.keys().next().value);
             }
         }
 
