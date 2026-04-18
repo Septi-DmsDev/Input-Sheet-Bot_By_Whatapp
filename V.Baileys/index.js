@@ -253,8 +253,21 @@ async function parseWebhookResponse(res) {
     };
 }
 
+function getGoogleServiceAccountRaw() {
+    const encoded = process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64;
+    if (encoded) {
+        try {
+            return Buffer.from(encoded, 'base64').toString('utf8');
+        } catch (error) {
+            throw new Error(`GOOGLE_SERVICE_ACCOUNT_JSON_B64 is not valid base64: ${error.message}`);
+        }
+    }
+
+    return process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
+}
+
 function hasGoogleSheetsAuth() {
-    return Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    return Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 || process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 }
 
 function getSheetRange(sheetName, a1Range) {
@@ -282,12 +295,18 @@ function normalizeCellValue(value) {
 async function getSheetsClient() {
     if (!sheetsClientPromise) {
         sheetsClientPromise = (async () => {
-            const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+            const raw = getGoogleServiceAccountRaw();
             if (!raw) {
-                throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is missing');
+                throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_JSON_B64 is missing');
             }
 
-            const credentials = JSON.parse(raw);
+            let credentials;
+            try {
+                credentials = JSON.parse(raw);
+            } catch (error) {
+                throw new Error(`Google service account JSON is invalid: ${error.message}`);
+            }
+
             const auth = new google.auth.GoogleAuth({
                 credentials,
                 scopes: ['https://www.googleapis.com/auth/spreadsheets']
@@ -437,9 +456,11 @@ async function callSheetsApi(tag, config, payload) {
 
 async function callDataSink(tag, config, payload) {
     if (config?.spreadsheet_id && hasGoogleSheetsAuth()) {
+        console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=sheets_api`);
         return callSheetsApi(tag, config, payload);
     }
 
+    console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=webhook`);
     return callWebhook(tag, config.webhook, payload);
 }
 
