@@ -780,12 +780,10 @@ async function connectToWhatsApp() {
             if (!match) continue;
 
             const [_, prefix, number, kodeFix, namaPetugas] = match;
-            const config = sheetsConfig[prefix.toUpperCase()];
+                const config = sheetsConfig[prefix.toUpperCase()];
             if (!config?.webhook) continue;
 
-            const now = new Date();
-            const day = String(now.getDate()).padStart(2, '0');
-            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const { day, month, hour, minute } = getJakartaDateParts();
 
             let timestamp;
             let kolomTarget;
@@ -794,9 +792,7 @@ async function connectToWhatsApp() {
                 timestamp = `${day}/${month}/ ${FIXED_TIMES[kodeFix]}`;
                 kolomTarget = config.kolom_fix;
             } else {
-                const hours = String(now.getHours()).padStart(2, '0');
-                const minutes = String(now.getMinutes()).padStart(2, '0');
-                timestamp = `${day}/${month}/ ${hours}.${minutes}`;
+                timestamp = `${day}/${month}/ ${hour}.${minute}`;
                 kolomTarget = config.kolom;
             }
 
@@ -822,8 +818,7 @@ async function connectToWhatsApp() {
     });
 }
 
-function getTimestamp() {
-    const now = new Date();
+function getJakartaDateParts(now = new Date()) {
     const options = {
         timeZone: 'Asia/Jakarta',
         day: '2-digit',
@@ -834,7 +829,18 @@ function getTimestamp() {
     };
     const parts = new Intl.DateTimeFormat('id-ID', options).formatToParts(now);
     const map = new Map(parts.map((p) => [p.type, p.value]));
-    return `${map.get('day')}/${map.get('month')}/ ${map.get('hour')}.${map.get('minute')}`;
+    return {
+        day: map.get('day'),
+        month: map.get('month'),
+        hour: map.get('hour'),
+        minute: map.get('minute')
+    };
+}
+
+function getTimestamp() {
+    const now = new Date();
+    const { day, month, hour, minute } = getJakartaDateParts(now);
+    return `${day}/${month}/ ${hour}.${minute}`;
 }
 
 startHealthServer();
