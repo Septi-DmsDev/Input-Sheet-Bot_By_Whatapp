@@ -25,6 +25,7 @@ const SHEETS_REQUEST_MIN_INTERVAL_MS = Number(process.env.SHEETS_REQUEST_MIN_INT
 const SHEETS_LOOKUP_CACHE_TTL_MS = Number(process.env.SHEETS_LOOKUP_CACHE_TTL_MS || 21600000);
 const SHEETS_NEGATIVE_LOOKUP_CACHE_TTL_MS = Number(process.env.SHEETS_NEGATIVE_LOOKUP_CACHE_TTL_MS || 300000);
 const SHEETS_429_RETRY_DELAY_MS = Number(process.env.SHEETS_429_RETRY_DELAY_MS || 15000);
+const SHEETS_CACHE_DEBUG = process.env.SHEETS_CACHE_DEBUG !== '0';
 const HEALTH_MAX_STALENESS_MS = Number(
     process.env.WA_HEALTH_MAX_STALENESS_MS || (LIVENESS_INTERVAL_MS + LIVENESS_TIMEOUT_MS + 30000)
 );
@@ -59,6 +60,11 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function logSheetsCache(event, details) {
+    if (!SHEETS_CACHE_DEBUG) return;
+    console.log(`[CACHE SHEETS] ${event} ${details}`);
+}
+
 async function runSheetsRequest(task) {
     const runner = async () => {
         const now = Date.now();
@@ -83,13 +89,18 @@ function getSheetsLookupCacheKey(spreadsheetId, sheetName, kode, lookupColumn) {
 
 function getCachedRowLookup(cacheKey) {
     const cached = sheetsRowCache.get(cacheKey);
-    if (!cached) return undefined;
-
-    if (cached.expiresAt <= Date.now()) {
-        sheetsRowCache.delete(cacheKey);
+    if (!cached) {
+        logSheetsCache('MISS', `key=${cacheKey}`);
         return undefined;
     }
 
+    if (cached.expiresAt <= Date.now()) {
+        sheetsRowCache.delete(cacheKey);
+        logSheetsCache('EXPIRE', `key=${cacheKey}`);
+        return undefined;
+    }
+
+    logSheetsCache('HIT', `key=${cacheKey} row=${cached.rowNumber === null ? 'null' : cached.rowNumber}`);
     return cached.rowNumber;
 }
 
@@ -98,6 +109,10 @@ function setCachedRowLookup(cacheKey, rowNumber, ttlMs) {
         rowNumber,
         expiresAt: Date.now() + ttlMs
     });
+    logSheetsCache(
+        'SET',
+        `key=${cacheKey} row=${rowNumber === null ? 'null' : rowNumber} ttlMs=${ttlMs} size=${sheetsRowCache.size}`
+    );
 }
 
 function truncate(value, max = 300) {
