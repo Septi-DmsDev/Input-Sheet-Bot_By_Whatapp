@@ -21,6 +21,10 @@ const WEBHOOK_TIMEOUT_MS = Number(process.env.WEBHOOK_TIMEOUT_MS || 20000);
 const WEBHOOK_MAX_RETRIES = Number(process.env.WEBHOOK_MAX_RETRIES || 3);
 const WEBHOOK_RETRY_DELAY_MS = Number(process.env.WEBHOOK_RETRY_DELAY_MS || 2000);
 const WEBHOOK_FAILURE_LOG = process.env.WEBHOOK_FAILURE_LOG || './failed_webhooks.ndjson';
+const SHEETS_REQUEST_MIN_INTERVAL_MS = Number(process.env.SHEETS_REQUEST_MIN_INTERVAL_MS || 1100);
+const SHEETS_LOOKUP_CACHE_TTL_MS = Number(process.env.SHEETS_LOOKUP_CACHE_TTL_MS || 21600000);
+const SHEETS_NEGATIVE_LOOKUP_CACHE_TTL_MS = Number(process.env.SHEETS_NEGATIVE_LOOKUP_CACHE_TTL_MS || 300000);
+const SHEETS_429_RETRY_DELAY_MS = Number(process.env.SHEETS_429_RETRY_DELAY_MS || 15000);
 const HEALTH_MAX_STALENESS_MS = Number(
     process.env.WA_HEALTH_MAX_STALENESS_MS || (LIVENESS_INTERVAL_MS + LIVENESS_TIMEOUT_MS + 30000)
 );
@@ -38,6 +42,9 @@ let lastConnectionOpenAt = 0;
 let lastDisconnectReason = 'boot';
 let isShuttingDown = false;
 let sheetsClientPromise = null;
+let sheetsRequestChain = Promise.resolve();
+let lastSheetsRequestAt = 0;
+const sheetsRowCache = new Map();
 
 function normalizeJid(jid) {
     return jid ? jid.replace(/:\d+@/, '@') : jid;
@@ -50,6 +57,47 @@ function forceExit(message, code = 1) {
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runSheetsRequest(task) {
+    const runner = async () => {
+        const now = Date.now();
+        const waitMs = Math.max(0, lastSheetsRequestAt + SHEETS_REQUEST_MIN_INTERVAL_MS - now);
+        if (waitMs > 0) {
+            await sleep(waitMs);
+        }
+
+        const result = await task();
+        lastSheetsRequestAt = Date.now();
+        return result;
+    };
+
+    const pending = sheetsRequestChain.then(runner, runner);
+    sheetsRequestChain = pending.catch(() => {});
+    return pending;
+}
+
+function getSheetsLookupCacheKey(spreadsheetId, sheetName, kode, lookupColumn) {
+    return [spreadsheetId, sheetName, lookupColumn, normalizeCellValue(kode)].join('::');
+}
+
+function getCachedRowLookup(cacheKey) {
+    const cached = sheetsRowCache.get(cacheKey);
+    if (!cached) return undefined;
+
+    if (cached.expiresAt <= Date.now()) {
+        sheetsRowCache.delete(cacheKey);
+        return undefined;
+    }
+
+    return cached.rowNumber;
+}
+
+function setCachedRowLookup(cacheKey, rowNumber, ttlMs) {
+    sheetsRowCache.set(cacheKey, {
+        rowNumber,
+        expiresAt: Date.now() + ttlMs
+    });
 }
 
 function truncate(value, max = 300) {
@@ -323,22 +371,31 @@ async function getSheetsClient() {
 }
 
 async function findRowByKode({ sheets, spreadsheetId, sheetName, kode, lookupColumn = 1 }) {
+    const cacheKey = getSheetsLookupCacheKey(spreadsheetId, sheetName, kode, lookupColumn);
+    const cachedRowNumber = getCachedRowLookup(cacheKey);
+    if (cachedRowNumber !== undefined) {
+        return cachedRowNumber;
+    }
+
     const lookupLetter = columnNumberToLetter(lookupColumn);
     const range = getSheetRange(sheetName, `${lookupLetter}:${lookupLetter}`);
-    const res = await sheets.spreadsheets.values.get({
+    const res = await runSheetsRequest(() => sheets.spreadsheets.values.get({
         spreadsheetId,
         range
-    });
+    }));
 
     const rows = res.data.values || [];
     const targetKode = normalizeCellValue(kode);
 
     for (let index = 0; index < rows.length; index += 1) {
         if (normalizeCellValue(rows[index]?.[0]) === targetKode) {
-            return index + 1;
+            const rowNumber = index + 1;
+            setCachedRowLookup(cacheKey, rowNumber, SHEETS_LOOKUP_CACHE_TTL_MS);
+            return rowNumber;
         }
     }
 
+    setCachedRowLookup(cacheKey, null, SHEETS_NEGATIVE_LOOKUP_CACHE_TTL_MS);
     return null;
 }
 
@@ -392,13 +449,16 @@ async function writePayloadToSheet(config, payload) {
         throw new Error(`no update data generated for ${payload.kode}`);
     }
 
-    await sheets.spreadsheets.values.batchUpdate({
+    await runSheetsRequest(() => sheets.spreadsheets.values.batchUpdate({
         spreadsheetId,
         requestBody: {
             valueInputOption: 'USER_ENTERED',
             data
         }
-    });
+    }));
+
+    const cacheKey = getSheetsLookupCacheKey(spreadsheetId, sheetName, payload.kode, lookupColumn);
+    setCachedRowLookup(cacheKey, rowNumber, SHEETS_LOOKUP_CACHE_TTL_MS);
 
     return {
         success: true,
@@ -436,7 +496,10 @@ async function callSheetsApi(tag, config, payload) {
             }
 
             if (attempt < WEBHOOK_MAX_RETRIES) {
-                await sleep(WEBHOOK_RETRY_DELAY_MS * attempt);
+                const delayMs = status === 429
+                    ? SHEETS_429_RETRY_DELAY_MS * attempt
+                    : WEBHOOK_RETRY_DELAY_MS * attempt;
+                await sleep(delayMs);
             }
         }
     }
