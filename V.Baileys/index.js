@@ -29,10 +29,24 @@ const SHEETS_CACHE_DEBUG = process.env.SHEETS_CACHE_DEBUG !== '0';
 const HEALTH_MAX_STALENESS_MS = Number(
     process.env.WA_HEALTH_MAX_STALENESS_MS || (LIVENESS_INTERVAL_MS + LIVENESS_TIMEOUT_MS + 30000)
 );
+const REPORT_GROUP_NAME = (process.env.REPORT_GROUP_NAME || 'LAPORAN HARIAN BOT').trim();
+const REKAP_LOG_FILE = process.env.REKAP_LOG_FILE || './rekap_harian.ndjson';
+const REPORT_STATE_FILE = process.env.REPORT_STATE_FILE || './report_state.json';
+const REPORT_SCHEDULER_INTERVAL_MS = Number(process.env.REPORT_SCHEDULER_INTERVAL_MS || 30000);
+const REPORT_WINDOW_MINUTES = Number(process.env.REPORT_WINDOW_MINUTES || 5);
+const REPORT_DIVISION_ORDER = ['DESAIN', 'PRINTING', 'FINISHING', 'CSM'];
+const REPORT_COMMAND_HELP = [
+    '!laporan',
+    '!laporan hariini',
+    '!laporan kemarin',
+    '!laporan kirim',
+    '!laporan kirim kemarin'
+].join('\n');
 
 let watchdogTimer = null;
 let livenessTimer = null;
 let reconnectTimer = null;
+let reportSchedulerTimer = null;
 let activeSock = null;
 let activeGeneration = 0;
 let activeConnectionState = 'close';
@@ -45,6 +59,8 @@ let isShuttingDown = false;
 let sheetsClientPromise = null;
 let sheetsRequestChain = Promise.resolve();
 let lastSheetsRequestAt = 0;
+let reportGroupJidCache = null;
+let isReportDispatchRunning = false;
 const sheetsRowCache = new Map();
 
 function normalizeJid(jid) {
@@ -137,6 +153,11 @@ function clearLivenessProbe() {
     clearInterval(livenessTimer);
     livenessTimer = null;
     isProbeRunning = false;
+}
+
+function stopReportScheduler() {
+    clearInterval(reportSchedulerTimer);
+    reportSchedulerTimer = null;
 }
 
 function destroySocket(sock) {
@@ -268,6 +289,7 @@ function shutdown(signal) {
     clearTimeout(watchdogTimer);
     clearTimeout(reconnectTimer);
     clearLivenessProbe();
+    stopReportScheduler();
     destroySocket(activeSock);
     setTimeout(() => process.exit(0), 250);
 }
@@ -353,6 +375,431 @@ function columnNumberToLetter(columnNumber) {
 
 function normalizeCellValue(value) {
     return String(value || '').trim().toUpperCase();
+}
+
+function getJakartaDateParts(now = new Date()) {
+    const options = {
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    };
+    const parts = new Intl.DateTimeFormat('id-ID', options).formatToParts(now);
+    const map = new Map(parts.map((part) => [part.type, part.value]));
+    const year = map.get('year');
+    const month = map.get('month');
+    const day = map.get('day');
+    const hour = map.get('hour');
+    const minute = map.get('minute');
+
+    return {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        dateKey: `${year}-${month}-${day}`,
+        timeKey: `${hour}:${minute}`
+    };
+}
+
+function getTimestamp(now = new Date()) {
+    const { day, month, hour, minute } = getJakartaDateParts(now);
+    return `${day}/${month}/ ${hour}.${minute}`;
+}
+
+function formatDateKey(dateKey) {
+    const [year, month, day] = String(dateKey || '').split('-');
+    if (!year || !month || !day) return String(dateKey || '');
+    return `${day}/${month}/${year}`;
+}
+
+function formatSlotDescription(slotLabel) {
+    return slotLabel === '16.00'
+        ? 'Rekap sementara sampai 16.00 WIB'
+        : 'Rekap penutupan hari';
+}
+
+function shiftDateKey(dateKey, deltaDays) {
+    const [year, month, day] = String(dateKey || '').split('-').map(Number);
+    if (!year || !month || !day) return '';
+
+    const utcDate = new Date(Date.UTC(year, month - 1, day + deltaDays));
+    const nextYear = utcDate.getUTCFullYear();
+    const nextMonth = String(utcDate.getUTCMonth() + 1).padStart(2, '0');
+    const nextDay = String(utcDate.getUTCDate()).padStart(2, '0');
+    return `${nextYear}-${nextMonth}-${nextDay}`;
+}
+
+function readJsonFile(filePath, fallbackValue) {
+    try {
+        if (!fs.existsSync(filePath)) {
+            return fallbackValue;
+        }
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (error) {
+        console.error(`[FILE] Gagal membaca ${filePath}: ${error.message}`);
+        return fallbackValue;
+    }
+}
+
+function writeJsonFile(filePath, value) {
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+    } catch (error) {
+        console.error(`[FILE] Gagal menulis ${filePath}: ${error.message}`);
+    }
+}
+
+function appendRekapLog(entry) {
+    try {
+        fs.appendFileSync(REKAP_LOG_FILE, `${JSON.stringify(entry)}\n`);
+    } catch (error) {
+        console.error(`[REKAP] Gagal menulis log: ${error.message}`);
+    }
+}
+
+function recordRekapEvent({
+    prefix,
+    number,
+    kode,
+    divisi,
+    subDivisi,
+    petugas,
+    groupName,
+    rawLine,
+    timestamp
+}) {
+    const nowParts = getJakartaDateParts();
+    appendRekapLog({
+        loggedAt: new Date().toISOString(),
+        dateKey: nowParts.dateKey,
+        timeKey: nowParts.timeKey,
+        kodePrefix: normalizeCellValue(prefix),
+        nomor: String(number || '').trim(),
+        kode: normalizeCellValue(kode),
+        divisi: normalizeCellValue(divisi),
+        subDivisi: normalizeCellValue(subDivisi),
+        petugas: String(petugas || '').trim(),
+        groupName: String(groupName || '').trim(),
+        rawLine: String(rawLine || '').trim(),
+        timestamp: String(timestamp || getTimestamp()).trim()
+    });
+}
+
+function readRekapEntriesForDate(dateKey) {
+    if (!fs.existsSync(REKAP_LOG_FILE)) {
+        return [];
+    }
+
+    try {
+        return fs.readFileSync(REKAP_LOG_FILE, 'utf8')
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .map((line) => {
+                try {
+                    return JSON.parse(line);
+                } catch {
+                    return null;
+                }
+            })
+            .filter((entry) => entry && entry.dateKey === dateKey);
+    } catch (error) {
+        console.error(`[REKAP] Gagal membaca log: ${error.message}`);
+        return [];
+    }
+}
+
+function buildDailyReportSummary(entries) {
+    const prefixMap = new Map();
+    const allCodes = new Set();
+
+    for (const entry of entries) {
+        const prefix = normalizeCellValue(entry.kodePrefix);
+        const kode = normalizeCellValue(entry.kode);
+        const divisi = normalizeCellValue(entry.divisi) || 'LAINNYA';
+        if (!prefix || !kode) continue;
+
+        allCodes.add(kode);
+
+        if (!prefixMap.has(prefix)) {
+            prefixMap.set(prefix, {
+                codes: new Set(),
+                divisions: new Map()
+            });
+        }
+
+        const bucket = prefixMap.get(prefix);
+        bucket.codes.add(kode);
+
+        if (!bucket.divisions.has(divisi)) {
+            bucket.divisions.set(divisi, new Set());
+        }
+        bucket.divisions.get(divisi).add(kode);
+    }
+
+    return {
+        totalPrefixes: prefixMap.size,
+        totalJobs: allCodes.size,
+        prefixes: [...prefixMap.entries()]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([prefix, bucket]) => {
+                const divisions = [...bucket.divisions.entries()]
+                    .map(([divisi, codes]) => ({ divisi, total: codes.size }))
+                    .sort((left, right) => {
+                        const leftIndex = REPORT_DIVISION_ORDER.indexOf(left.divisi);
+                        const rightIndex = REPORT_DIVISION_ORDER.indexOf(right.divisi);
+                        const normalizedLeft = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+                        const normalizedRight = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+                        if (normalizedLeft !== normalizedRight) {
+                            return normalizedLeft - normalizedRight;
+                        }
+                        return left.divisi.localeCompare(right.divisi);
+                    });
+
+                return {
+                    prefix,
+                    totalJobs: bucket.codes.size,
+                    divisions
+                };
+            })
+    };
+}
+
+function buildDailyReportMessage(dateKey, slotLabel) {
+    const entries = readRekapEntriesForDate(dateKey);
+    const summary = buildDailyReportSummary(entries);
+    const reportType = formatSlotDescription(slotLabel);
+    const lines = [
+        'LAPORAN HARIAN BOT',
+        `Tanggal : ${formatDateKey(dateKey)}`,
+        `Sesi    : ${slotLabel} WIB`,
+        `Jenis   : ${reportType}`,
+        '',
+        'RINGKASAN',
+        `- Total job unik : ${summary.totalJobs}`,
+        `- Prefix aktif   : ${summary.totalPrefixes}`
+    ];
+
+    if (!summary.prefixes.length) {
+        lines.push('', 'DETAIL PREFIX', 'Belum ada job yang tercatat pada periode ini.');
+        return lines.join('\n');
+    }
+
+    lines.push('', 'DETAIL PREFIX');
+
+    summary.prefixes.forEach((item, index) => {
+        const divisionText = item.divisions.length
+            ? item.divisions.map((division) => `${division.divisi} ${division.total}`).join(' | ')
+            : '-';
+        lines.push(`${index + 1}. ${item.prefix}`);
+        lines.push(`   Total job   : ${item.totalJobs}`);
+        lines.push(`   Divisi aktif: ${item.divisions.length}`);
+        lines.push(`   Sebaran     : ${divisionText}`);
+    });
+
+    return lines.join('\n');
+}
+
+function getManualReportTarget(argument, nowParts) {
+    const normalizedArgument = normalizeCellValue(argument || '');
+    if (normalizedArgument === 'KEMARIN') {
+        return {
+            dateKey: shiftDateKey(nowParts.dateKey, -1),
+            slotLabel: '00.00',
+            description: 'preview kemarin'
+        };
+    }
+
+    return {
+        dateKey: nowParts.dateKey,
+        slotLabel: '16.00',
+        description: 'preview hari ini'
+    };
+}
+
+function parseReportCommand(text, nowParts) {
+    const trimmed = String(text || '').trim();
+    const match = trimmed.match(/^!laporan(?:\s+(\S+))?(?:\s+(\S+))?$/i);
+    if (!match) return null;
+
+    const firstArg = normalizeCellValue(match[1] || '');
+    const secondArg = normalizeCellValue(match[2] || '');
+
+    if (!firstArg) {
+        return {
+            mode: 'preview',
+            ...getManualReportTarget('', nowParts)
+        };
+    }
+
+    if (firstArg === 'HELP') {
+        return { mode: 'help' };
+    }
+
+    if (firstArg === 'KIRIM') {
+        return {
+            mode: 'send',
+            ...getManualReportTarget(secondArg, nowParts)
+        };
+    }
+
+    if (firstArg === 'HARIINI' || firstArg === 'KEMARIN') {
+        return {
+            mode: 'preview',
+            ...getManualReportTarget(firstArg, nowParts)
+        };
+    }
+
+    return { mode: 'help' };
+}
+
+function getReportState() {
+    const state = readJsonFile(REPORT_STATE_FILE, { sentSlots: {} });
+    if (!state || typeof state !== 'object') {
+        return { sentSlots: {} };
+    }
+    if (!state.sentSlots || typeof state.sentSlots !== 'object') {
+        state.sentSlots = {};
+    }
+    return state;
+}
+
+function pruneReportState(state) {
+    const keys = Object.keys(state.sentSlots || {}).sort().reverse().slice(0, 120);
+    const nextSentSlots = {};
+    for (const key of keys) {
+        nextSentSlots[key] = state.sentSlots[key];
+    }
+    state.sentSlots = nextSentSlots;
+    return state;
+}
+
+async function findGroupJidByName(sock, targetName) {
+    const normalizedTarget = String(targetName || '').trim().toLowerCase();
+    if (!normalizedTarget) return null;
+
+    if (reportGroupJidCache && groupNameCache.get(reportGroupJidCache) === normalizedTarget) {
+        return reportGroupJidCache;
+    }
+
+    for (const [jid, name] of groupNameCache.entries()) {
+        if (name === normalizedTarget) {
+            reportGroupJidCache = jid;
+            return jid;
+        }
+    }
+
+    try {
+        const groups = await sock.groupFetchAllParticipating();
+        for (const [jid, metadata] of Object.entries(groups || {})) {
+            const subject = String(metadata?.subject || '').trim().toLowerCase();
+            if (!subject) continue;
+            groupNameCache.set(jid, subject);
+            if (subject === normalizedTarget) {
+                reportGroupJidCache = jid;
+                return jid;
+            }
+        }
+    } catch (error) {
+        console.error(`[REPORT] Gagal mengambil daftar grup: ${error.message}`);
+    }
+
+    return null;
+}
+
+function getScheduledReportTarget(nowParts) {
+    const hour = Number(nowParts.hour);
+    const minute = Number(nowParts.minute);
+    const currentMinuteOfDay = (hour * 60) + minute;
+    const target1600 = 16 * 60;
+
+    if (currentMinuteOfDay >= target1600 && currentMinuteOfDay < (target1600 + REPORT_WINDOW_MINUTES)) {
+        return {
+            slotKey: `16:00::${nowParts.dateKey}`,
+            slotLabel: '16.00',
+            dateKey: nowParts.dateKey
+        };
+    }
+
+    if (currentMinuteOfDay >= 0 && currentMinuteOfDay < REPORT_WINDOW_MINUTES) {
+        const previousDateKey = shiftDateKey(nowParts.dateKey, -1);
+        return {
+            slotKey: `00:00::${previousDateKey}`,
+            slotLabel: '00.00',
+            dateKey: previousDateKey
+        };
+    }
+
+    return null;
+}
+
+async function runReportScheduler(sock, generation) {
+    if (
+        isShuttingDown ||
+        generation !== activeGeneration ||
+        activeConnectionState !== 'open' ||
+        isReportDispatchRunning
+    ) {
+        return;
+    }
+
+    const nowParts = getJakartaDateParts();
+    const target = getScheduledReportTarget(nowParts);
+    if (!target?.dateKey) {
+        return;
+    }
+
+    const state = getReportState();
+    if (state.sentSlots[target.slotKey]) {
+        return;
+    }
+
+    isReportDispatchRunning = true;
+
+    try {
+        const message = buildDailyReportMessage(target.dateKey, target.slotLabel);
+        const groupJid = await findGroupJidByName(sock, REPORT_GROUP_NAME);
+        if (!groupJid) {
+            throw new Error(`Grup "${REPORT_GROUP_NAME}" tidak ditemukan`);
+        }
+
+        await sock.sendMessage(groupJid, { text: message });
+
+        state.sentSlots[target.slotKey] = {
+            sentAt: new Date().toISOString(),
+            groupJid,
+            reportDate: target.dateKey
+        };
+        writeJsonFile(REPORT_STATE_FILE, pruneReportState(state));
+        console.log(`[REPORT] Terkirim slot=${target.slotKey} group=${REPORT_GROUP_NAME}`);
+    } catch (error) {
+        console.error(`[REPORT] Gagal mengirim laporan: ${error.message}`);
+    } finally {
+        isReportDispatchRunning = false;
+    }
+}
+
+function startReportScheduler(sock, generation) {
+    stopReportScheduler();
+    reportSchedulerTimer = setInterval(() => {
+        runReportScheduler(sock, generation).catch((error) => {
+            console.error(`[REPORT] Scheduler error: ${error.stack || error.message}`);
+        });
+    }, REPORT_SCHEDULER_INTERVAL_MS);
+
+    runReportScheduler(sock, generation).catch((error) => {
+        console.error(`[REPORT] Initial scheduler error: ${error.stack || error.message}`);
+    });
+}
+
+async function sendManualReport(sock, targetJid, dateKey, slotLabel, label) {
+    const message = buildDailyReportMessage(dateKey, slotLabel);
+    await sock.sendMessage(targetJid, { text: message });
+    console.log(`[REPORT] Manual send target=${targetJid} label=${label} date=${dateKey} slot=${slotLabel}`);
 }
 
 async function getSheetsClient() {
@@ -644,6 +1091,7 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             activeConnectionState = 'close';
             clearLivenessProbe();
+            stopReportScheduler();
             lastDisconnectReason = String(
                 (lastDisconnect?.error instanceof Boom && lastDisconnect.error.output?.statusCode) ||
                 lastDisconnect?.error?.message ||
@@ -670,6 +1118,7 @@ async function connectToWhatsApp() {
             lastSuccessfulProbeAt = Date.now();
             stopWatchdog();
             startLivenessProbe(sock, generation);
+            startReportScheduler(sock, generation);
             console.log('[WA] connection=open bot siap menerima pesan.');
             return;
         }
@@ -740,6 +1189,46 @@ async function connectToWhatsApp() {
             process.exit(1);
         }
 
+        const nowParts = getJakartaDateParts();
+        const reportCommand = parseReportCommand(text, nowParts);
+        if (reportCommand) {
+            if (reportCommand.mode === 'help') {
+                return reply(`Format laporan:\n${REPORT_COMMAND_HELP}`);
+            }
+
+            try {
+                if (reportCommand.mode === 'send') {
+                    const reportGroupJid = await findGroupJidByName(sock, REPORT_GROUP_NAME);
+                    if (!reportGroupJid) {
+                        return reply(`Grup "${REPORT_GROUP_NAME}" belum ditemukan.`);
+                    }
+
+                    await sendManualReport(
+                        sock,
+                        reportGroupJid,
+                        reportCommand.dateKey,
+                        reportCommand.slotLabel,
+                        reportCommand.description
+                    );
+                    return reply(
+                        `Laporan ${reportCommand.description} berhasil dikirim ke grup ${REPORT_GROUP_NAME}.`
+                    );
+                }
+
+                await sendManualReport(
+                    sock,
+                    from,
+                    reportCommand.dateKey,
+                    reportCommand.slotLabel,
+                    reportCommand.description
+                );
+                return;
+            } catch (error) {
+                console.error(`[REPORT] Manual command gagal: ${error.message}`);
+                return reply(`Gagal membuat laporan: ${error.message}`);
+            }
+        }
+
         const lines = text.split('\n');
 
         if (isGroup && groupName.includes('apo printing')) {
@@ -767,6 +1256,17 @@ async function connectToWhatsApp() {
                     };
                     const result = await callDataSink('PRINTING', config, payload);
                     if (result.success) {
+                        recordRekapEvent({
+                            prefix,
+                            number,
+                            kode,
+                            divisi: 'PRINTING',
+                            subDivisi: isCut ? 'CUT' : 'PRINTING',
+                            petugas: namaFinal,
+                            groupName,
+                            rawLine: line,
+                            timestamp: payload.timestamp
+                        });
                         await safeReact(sock, from, msg.key, isCut ? '✂️' : '🖨️');
                     }
                 } catch (err) {
@@ -809,6 +1309,17 @@ async function connectToWhatsApp() {
                     };
                     const result = await callDataSink('FINISHING', config, payload);
                     if (result.success) {
+                        recordRekapEvent({
+                            prefix,
+                            number,
+                            kode: `${prefix.toUpperCase()} ${number}`,
+                            divisi: 'FINISHING',
+                            subDivisi: jenis.toUpperCase(),
+                            petugas,
+                            groupName,
+                            rawLine: line,
+                            timestamp: payload.timestamp
+                        });
                         await safeReact(sock, from, msg.key, target.emo);
                     }
                 } catch (err) {
@@ -841,6 +1352,17 @@ async function connectToWhatsApp() {
                         };
                         const result = await callDataSink('CSM', config, payload);
                         if (result.success) {
+                            recordRekapEvent({
+                                prefix,
+                                number,
+                                kode: `${prefix.toUpperCase()} ${number}`,
+                                divisi: 'CSM',
+                                subDivisi: 'SA',
+                                petugas,
+                                groupName,
+                                rawLine: line,
+                                timestamp: payload.timestamp
+                            });
                             await safeReact(sock, from, msg.key, '🎀');
                         }
                     } catch (err) {
@@ -887,6 +1409,17 @@ async function connectToWhatsApp() {
                 };
                 const result = await callDataSink('DESAIN', config, payload);
                 if (result.success) {
+                    recordRekapEvent({
+                        prefix,
+                        number,
+                        kode: `${prefix.toUpperCase()} ${number}`,
+                        divisi: 'DESAIN',
+                        subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'DESAIN',
+                        petugas: namaPetugas,
+                        groupName,
+                        rawLine: line,
+                        timestamp
+                    });
                     await safeReact(sock, from, msg.key, '✅');
                 }
             } catch (err) {
@@ -894,31 +1427,6 @@ async function connectToWhatsApp() {
             }
         }
     });
-}
-
-function getJakartaDateParts(now = new Date()) {
-    const options = {
-        timeZone: 'Asia/Jakarta',
-        day: '2-digit',
-        month: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-    };
-    const parts = new Intl.DateTimeFormat('id-ID', options).formatToParts(now);
-    const map = new Map(parts.map((p) => [p.type, p.value]));
-    return {
-        day: map.get('day'),
-        month: map.get('month'),
-        hour: map.get('hour'),
-        minute: map.get('minute')
-    };
-}
-
-function getTimestamp() {
-    const now = new Date();
-    const { day, month, hour, minute } = getJakartaDateParts(now);
-    return `${day}/${month}/ ${hour}.${minute}`;
 }
 
 startHealthServer();
