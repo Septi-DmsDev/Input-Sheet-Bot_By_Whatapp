@@ -1570,19 +1570,23 @@ async function connectToWhatsApp() {
                 }
 
                 // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] (SA|ACC) [OFFSET?]
-                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+)\s+(SA|ACC)(?:\s+(\d+))?$/i);
+                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*)\s+(SA|ACC)(?:\s+(\d+))?$/i);
                 if (shopeeMatch) {
                     const [_, orderNumber, petugas, jenis, offset] = shopeeMatch;
                     const config = sheetsConfig['PRISMATICA'];
                     if (!config?.webhook) continue;
+
+                    const isAcc = jenis.toUpperCase() === 'ACC';
+                    const targetKolom = isAcc ? (config.kolom_acc || config.kolom || 9) : (config.kolom_cs || config.kolom_job_masuk || 7);
+                    const targetKolomPetugas = isAcc ? (config.kolom_petugas_acc || 10) : (config.kolom_petugas_cs || config.kolom_petugas_job_masuk || 8);
 
                     try {
                         const payload = {
                             kode: orderNumber.toUpperCase(),
                             sheet: config.sheet,
                             timestamp: getTimestamp(),
-                            kolom: config.kolom_cs || 9,
-                            kolom_petugas: config.kolom_petugas_cs || 10,
+                            kolom: targetKolom,
+                            kolom_petugas: targetKolomPetugas,
                             petugas,
                             offset: offset || 0
                         };
@@ -1593,7 +1597,7 @@ async function connectToWhatsApp() {
                                 number: orderNumber,
                                 kode: orderNumber.toUpperCase(),
                                 divisi: 'CSM',
-                                subDivisi: jenis.toUpperCase(),
+                                subDivisi: isAcc ? 'ACC' : 'JOB_MASUK',
                                 petugas,
                                 groupName,
                                 rawLine,
@@ -1688,8 +1692,8 @@ async function connectToWhatsApp() {
                 } else {
                     // ACC Pertama (misal: 26091425CGHYKM test) -> Masuk ACC Pertama
                     timestamp = `${day}/${month}/ ${hour}.${minute}`;
-                    kolomTarget = config.kolom_cs || config.kolom || 9;
-                    kolomNamaTarget = config.kolom_petugas_cs || 10;
+                    kolomTarget = config.kolom_acc || config.kolom || 9;
+                    kolomNamaTarget = config.kolom_petugas_acc || 10;
                 }
 
                 try {
