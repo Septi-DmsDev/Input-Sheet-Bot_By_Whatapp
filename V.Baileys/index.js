@@ -1577,8 +1577,8 @@ async function connectToWhatsApp() {
                     if (!config?.webhook) continue;
 
                     const isAcc = jenis.toUpperCase() === 'ACC';
-                    const targetKolom = isAcc ? (config.kolom_acc || config.kolom || 9) : (config.kolom_cs || config.kolom_job_masuk || 7);
-                    const targetKolomPetugas = isAcc ? (config.kolom_petugas_acc || 10) : (config.kolom_petugas_cs || config.kolom_petugas_job_masuk || 8);
+                    const targetKolom = isAcc ? (config.kolom || 9) : (config.kolom_cs || 7);
+                    const targetKolomPetugas = isAcc ? (config.kolom_petugas || 10) : (config.kolom_petugas_cs || 8);
 
                     try {
                         const payload = {
@@ -1692,8 +1692,8 @@ async function connectToWhatsApp() {
                 } else {
                     // ACC Pertama (misal: 26091425CGHYKM test) -> Masuk ACC Pertama
                     timestamp = `${day}/${month}/ ${hour}.${minute}`;
-                    kolomTarget = config.kolom_acc || config.kolom || 9;
-                    kolomNamaTarget = config.kolom_petugas_acc || 10;
+                    kolomTarget = config.kolom || 9;
+                    kolomNamaTarget = config.kolom_petugas || 10;
                 }
 
                 try {
