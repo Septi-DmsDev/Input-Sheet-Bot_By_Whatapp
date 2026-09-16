@@ -1393,7 +1393,7 @@ async function connectToWhatsApp() {
                             timestamp: getTimestamp(),
                             kolom: isCut ? (config.kolom_cut || 15) : (config.kolom_printing || 13),
                             namaPetugas: namaFinal,
-                            kolomNama: isCut ? (config.kolom_petugas_cut || 16) : (config.kolom_petugas || 14),
+                            kolomNama: isCut ? (config.kolom_petugas_cut || 16) : (config.kolom_petugas_printing || config.kolom_petugas || 14),
                             offset: extraNumber ? Number(extraNumber) : 0
                         };
                         const result = await callDataSink('PRINTING', config, payload);
@@ -1667,7 +1667,7 @@ async function connectToWhatsApp() {
             }
 
             // 2. Cek format Shopee: [NO_PESANAN] [FIX_CODE?] [PETUGAS?]
-            const shopeeMatch = clean.match(/^(\d{6}[A-Za-z0-9]{7,11})(?:\s([1-4]))?(?:\s+([a-zA-Z\/]+))?$/i);
+            const shopeeMatch = clean.match(/^(\d{6}[A-Za-z0-9]{7,11})(?:\s+([1-4]))?(?:\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*))?$/i);
             if (shopeeMatch) {
                 const [_, orderNumber, kodeFix, namaPetugas] = shopeeMatch;
                 const config = sheetsConfig['PRISMATICA'];
@@ -1678,13 +1678,18 @@ async function connectToWhatsApp() {
 
                 let timestamp;
                 let kolomTarget;
+                let kolomNamaTarget;
 
                 if (kodeFix && FIXED_TIMES[kodeFix]) {
+                    // Fix Desain (misal: 26091425CGHYKM 1 Dimas) -> Masuk Fix Desain
                     timestamp = `${day}/${month}/ ${FIXED_TIMES[kodeFix]}`;
                     kolomTarget = config.kolom_fix || 11;
+                    kolomNamaTarget = config.kolom_petugas_desain || 12;
                 } else {
+                    // ACC Pertama (misal: 26091425CGHYKM test) -> Masuk ACC Pertama
                     timestamp = `${day}/${month}/ ${hour}.${minute}`;
-                    kolomTarget = config.kolom || 11;
+                    kolomTarget = config.kolom_cs || config.kolom || 9;
+                    kolomNamaTarget = config.kolom_petugas_cs || 10;
                 }
 
                 try {
@@ -1693,9 +1698,9 @@ async function connectToWhatsApp() {
                         sheet: config.sheet,
                         timestamp,
                         kolom: kolomTarget,
-                        ...(namaPetugas && (config.kolom_petugas_desain || 12) && {
+                        ...(namaPetugas && kolomNamaTarget && {
                             namaPetugas,
-                            kolomNama: config.kolom_petugas_desain || 12
+                            kolomNama: kolomNamaTarget
                         })
                     };
                     const result = await callDataSink('DESAIN', config, payload);
@@ -1705,7 +1710,7 @@ async function connectToWhatsApp() {
                             number: orderNumber,
                             kode,
                             divisi: 'DESAIN',
-                            subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'DESAIN',
+                            subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'ACC',
                             petugas: namaPetugas,
                             groupName,
                             rawLine: rawLine,
