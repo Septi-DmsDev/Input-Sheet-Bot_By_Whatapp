@@ -268,8 +268,20 @@ function startHealthServer() {
         res.end(JSON.stringify(snapshot));
     });
 
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            const nextPort = HEALTH_PORT === 3000 ? 3001 : HEALTH_PORT + 1;
+            console.warn(`[HEALTH] Port ${HEALTH_PORT} sedang digunakan. Mencoba port alternatif ${nextPort}...`);
+            server.listen(nextPort, '0.0.0.0');
+        } else {
+            console.error('[HEALTH] Server error:', err.message);
+        }
+    });
+
     server.listen(HEALTH_PORT, '0.0.0.0', () => {
-        console.log(`[HEALTH] Endpoint aktif di :${HEALTH_PORT}/healthz`);
+        const addr = server.address();
+        const port = typeof addr === 'object' && addr ? addr.port : HEALTH_PORT;
+        console.log(`[HEALTH] Endpoint aktif di :${port}/healthz`);
     });
 }
 
@@ -1060,6 +1072,10 @@ async function callSheetsApi(tag, config, payload) {
 }
 
 async function callDataSink(tag, config, payload) {
+    if (config?.lookup_column && !payload.lookup_column) {
+        payload.lookup_column = config.lookup_column;
+    }
+
     if (config?.spreadsheet_id && hasGoogleSheetsAuth()) {
         console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=sheets_api`);
         return callSheetsApi(tag, config, payload);
@@ -1178,8 +1194,10 @@ async function connectToWhatsApp() {
                 'unknown_close'
             );
 
-            const shouldReconnect =
-                (lastDisconnect?.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+            const statusCode = lastDisconnect?.error instanceof Boom
+                ? lastDisconnect.error.output?.statusCode
+                : lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             console.log(`[WA] connection=close reconnect=${shouldReconnect} reason=${lastDisconnectReason}`);
 
@@ -1312,45 +1330,90 @@ async function connectToWhatsApp() {
         const lines = text.split('\n');
 
         if (isGroup && groupName.includes('apo printing')) {
-            for (const line of lines) {
-                const match = line.trim().match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+(?:\s[a-zA-Z]+)*)(?:\s(\d+))?$/i);
-                if (!match) continue;
+            for (const rawLine of lines) {
+                const line = rawLine.trim().replace(/[*_~`]/g, '');
 
-                const [_, prefix, number, namaPetugas, extraNumber] = match;
-                const config = sheetsConfig[prefix.toUpperCase()];
-                if (!config?.webhook) continue;
+                // 1. Cek format standar: [PREFIX] [NOMOR] [PETUGAS] [OFFSET?]
+                const match = line.match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+(?:\s[a-zA-Z]+)*)(?:\s(\d+))?$/i);
+                if (match) {
+                    const [_, prefix, number, namaPetugas, extraNumber] = match;
+                    const config = sheetsConfig[prefix.toUpperCase()];
+                    if (!config?.webhook) continue;
 
-                const isCut = namaPetugas.toLowerCase().endsWith('cut');
-                const namaFinal = isCut ? namaPetugas.replace(/cut$/i, '').trim() : namaPetugas;
-                const kode = `${prefix.toUpperCase()} ${number}`;
+                    const isCut = namaPetugas.toLowerCase().endsWith('cut');
+                    const namaFinal = isCut ? namaPetugas.replace(/cut$/i, '').trim() : namaPetugas;
+                    const kode = `${prefix.toUpperCase()} ${number}`;
 
-                try {
-                    const payload = {
-                        kode,
-                        sheet: config.sheet,
-                        timestamp: getTimestamp(),
-                        kolom: isCut ? (config.kolom_cut || 17) : (config.kolom_printing || 15),
-                        namaPetugas: namaFinal,
-                        kolomNama: isCut ? (config.kolom_petugas_cut || 18) : (config.kolom_petugas || 16),
-                        offset: extraNumber ? Number(extraNumber) : 0
-                    };
-                    const result = await callDataSink('PRINTING', config, payload);
-                    if (result.success) {
-                        recordRekapEvent({
-                            prefix,
-                            number,
+                    try {
+                        const payload = {
                             kode,
-                            divisi: 'PRINTING',
-                            subDivisi: isCut ? 'CUT' : 'PRINTING',
-                            petugas: namaFinal,
-                            groupName,
-                            rawLine: line,
-                            timestamp: payload.timestamp
-                        });
-                        await safeReact(sock, from, msg.key, isCut ? '✂️' : '🖨️');
+                            sheet: config.sheet,
+                            timestamp: getTimestamp(),
+                            kolom: isCut ? (config.kolom_cut || 17) : (config.kolom_printing || 15),
+                            namaPetugas: namaFinal,
+                            kolomNama: isCut ? (config.kolom_petugas_cut || 18) : (config.kolom_petugas || 16),
+                            offset: extraNumber ? Number(extraNumber) : 0
+                        };
+                        const result = await callDataSink('PRINTING', config, payload);
+                        if (result.success) {
+                            recordRekapEvent({
+                                prefix,
+                                number,
+                                kode,
+                                divisi: 'PRINTING',
+                                subDivisi: isCut ? 'CUT' : 'PRINTING',
+                                petugas: namaFinal,
+                                groupName,
+                                rawLine,
+                                timestamp: payload.timestamp
+                            });
+                            await safeReact(sock, from, msg.key, isCut ? '✂️' : '🖨️');
+                        }
+                    } catch (err) {
+                        console.error('Error Datasink Printing:', err.message);
                     }
-                } catch (err) {
-                    console.error('Error Datasink Printing:', err.message);
+                    continue;
+                }
+
+                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] [OFFSET?]
+                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+(?:\s[a-zA-Z]+)*)(?:\s(\d+))?$/i);
+                if (shopeeMatch) {
+                    const [_, orderNumber, namaPetugas, extraNumber] = shopeeMatch;
+                    const config = sheetsConfig['PRISMATICA'];
+                    if (!config?.webhook) continue;
+
+                    const isCut = namaPetugas.toLowerCase().endsWith('cut');
+                    const namaFinal = isCut ? namaPetugas.replace(/cut$/i, '').trim() : namaPetugas;
+                    const kode = orderNumber.toUpperCase();
+
+                    try {
+                        const payload = {
+                            kode,
+                            sheet: config.sheet,
+                            timestamp: getTimestamp(),
+                            kolom: isCut ? (config.kolom_cut || 15) : (config.kolom_printing || 13),
+                            namaPetugas: namaFinal,
+                            kolomNama: isCut ? (config.kolom_petugas_cut || 16) : (config.kolom_petugas || 14),
+                            offset: extraNumber ? Number(extraNumber) : 0
+                        };
+                        const result = await callDataSink('PRINTING', config, payload);
+                        if (result.success) {
+                            recordRekapEvent({
+                                prefix: 'PRISMATICA',
+                                number: orderNumber,
+                                kode,
+                                divisi: 'PRINTING',
+                                subDivisi: isCut ? 'CUT' : 'PRINTING',
+                                petugas: namaFinal,
+                                groupName,
+                                rawLine,
+                                timestamp: payload.timestamp
+                            });
+                            await safeReact(sock, from, msg.key, isCut ? '✂️' : '🖨️');
+                        }
+                    } catch (err) {
+                        console.error('Error Datasink Printing Shopee:', err.message);
+                    }
                 }
             }
 
@@ -1358,52 +1421,104 @@ async function connectToWhatsApp() {
         }
 
         if (isGroup && groupName.includes('apo finishing')) {
-            for (const line of lines) {
-                const match = line.trim().match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+)\s+(CU|CP|PAC|PT|DR)(?:\s+(\d+))?$/i);
-                if (!match) continue;
+            for (const rawLine of lines) {
+                const line = rawLine.trim().replace(/[*_~`]/g, '');
 
-                const [_, prefix, number, petugas, jenis, offset] = match;
-                const config = sheetsConfig[prefix.toUpperCase()];
-                if (!config?.webhook) continue;
+                // 1. Cek format standar: [PREFIX] [NOMOR] [PETUGAS] [JENIS] [OFFSET?]
+                const match = line.match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+)\s+(CU|CP|PAC|PT|DR)(?:\s+(\d+))?$/i);
+                if (match) {
+                    const [_, prefix, number, petugas, jenis, offset] = match;
+                    const config = sheetsConfig[prefix.toUpperCase()];
+                    if (!config?.webhook) continue;
 
-                const mapping = {
-                    CU: { tgl: config.kolom_cheker_undangan, ptg: config.kolom_petugas_cheker_undangan, emo: '🗒️' },
-                    CP: { tgl: config.kolom_cheker_paket, ptg: config.kolom_petugas_cheker_paket, emo: '📝' },
-                    PAC: { tgl: config.kolom_cheker_packing, ptg: config.kolom_petugas_cheker_packing, emo: '📦' },
-                    PT: { tgl: config.kolom_potong, ptg: config.kolom_petugas_potong, emo: '🪓' },
-                    DR: { tgl: config.kolom_driver, ptg: config.kolom_petugas_driver, emo: '🚚' }
-                };
-
-                const target = mapping[jenis.toUpperCase()];
-                if (!target || !target.tgl) continue;
-
-                try {
-                    const payload = {
-                        kode: `${prefix.toUpperCase()} ${number}`,
-                        sheet: config.sheet,
-                        timestamp: getTimestamp(),
-                        kolom: target.tgl,
-                        kolom_petugas: target.ptg,
-                        petugas,
-                        offset: offset || 0
+                    const mapping = {
+                        CU: { tgl: config.kolom_cheker_undangan, ptg: config.kolom_petugas_cheker_undangan, emo: '🗒️' },
+                        CP: { tgl: config.kolom_cheker_paket, ptg: config.kolom_petugas_cheker_paket, emo: '📝' },
+                        PAC: { tgl: config.kolom_cheker_packing, ptg: config.kolom_petugas_cheker_packing, emo: '📦' },
+                        PT: { tgl: config.kolom_potong, ptg: config.kolom_petugas_potong, emo: '🪓' },
+                        DR: { tgl: config.kolom_driver, ptg: config.kolom_petugas_driver, emo: '🚚' }
                     };
-                    const result = await callDataSink('FINISHING', config, payload);
-                    if (result.success) {
-                        recordRekapEvent({
-                            prefix,
-                            number,
+
+                    const target = mapping[jenis.toUpperCase()];
+                    if (!target || !target.tgl) continue;
+
+                    try {
+                        const payload = {
                             kode: `${prefix.toUpperCase()} ${number}`,
-                            divisi: 'FINISHING',
-                            subDivisi: jenis.toUpperCase(),
+                            sheet: config.sheet,
+                            timestamp: getTimestamp(),
+                            kolom: target.tgl,
+                            kolom_petugas: target.ptg,
                             petugas,
-                            groupName,
-                            rawLine: line,
-                            timestamp: payload.timestamp
-                        });
-                        await safeReact(sock, from, msg.key, target.emo);
+                            offset: offset || 0
+                        };
+                        const result = await callDataSink('FINISHING', config, payload);
+                        if (result.success) {
+                            recordRekapEvent({
+                                prefix,
+                                number,
+                                kode: `${prefix.toUpperCase()} ${number}`,
+                                divisi: 'FINISHING',
+                                subDivisi: jenis.toUpperCase(),
+                                petugas,
+                                groupName,
+                                rawLine,
+                                timestamp: payload.timestamp
+                            });
+                            await safeReact(sock, from, msg.key, target.emo);
+                        }
+                    } catch (err) {
+                        console.error('Error Datasink Finishing:', err.message);
                     }
-                } catch (err) {
-                    console.error('Error Datasink Finishing:', err.message);
+                    continue;
+                }
+
+                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] [JENIS] [OFFSET?]
+                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+)\s+(CU|CP|PAC|PT|DR|FIN)(?:\s+(\d+))?$/i);
+                if (shopeeMatch) {
+                    const [_, orderNumber, petugas, jenis, offset] = shopeeMatch;
+                    const config = sheetsConfig['PRISMATICA'];
+                    if (!config?.webhook) continue;
+
+                    const mappingShopee = {
+                        CP: { tgl: config.kolom_cheker_paket || 19, ptg: config.kolom_petugas_cheker_paket || 20, emo: '📝' },
+                        PAC: { tgl: config.kolom_cheker_packing || 21, ptg: null, emo: '📦' },
+                        FIN: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🪓' },
+                        PT: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🪓' },
+                        CU: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🗒️' },
+                        DR: { tgl: config.kolom_finishing || 17, ptg: null, emo: '🚚' }
+                    };
+
+                    const target = mappingShopee[jenis.toUpperCase()];
+                    if (!target || !target.tgl) continue;
+
+                    try {
+                        const payload = {
+                            kode: orderNumber.toUpperCase(),
+                            sheet: config.sheet,
+                            timestamp: getTimestamp(),
+                            kolom: target.tgl,
+                            ...(target.ptg && { kolom_petugas: target.ptg, petugas }),
+                            offset: offset || 0
+                        };
+                        const result = await callDataSink('FINISHING', config, payload);
+                        if (result.success) {
+                            recordRekapEvent({
+                                prefix: 'PRISMATICA',
+                                number: orderNumber,
+                                kode: orderNumber.toUpperCase(),
+                                divisi: 'FINISHING',
+                                subDivisi: jenis.toUpperCase(),
+                                petugas,
+                                groupName,
+                                rawLine,
+                                timestamp: payload.timestamp
+                            });
+                            await safeReact(sock, from, msg.key, target.emo);
+                        }
+                    } catch (err) {
+                        console.error('Error Datasink Finishing Shopee:', err.message);
+                    }
                 }
             }
 
@@ -1411,42 +1526,83 @@ async function connectToWhatsApp() {
         }
 
         if (isGroup && groupName.includes('apo csm')) {
-            for (const line of lines) {
-                const match = line.trim().match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+)\s+(SA)(?:\s+(\d+))?$/i);
-                if (!match) continue;
+            for (const rawLine of lines) {
+                const line = rawLine.trim().replace(/[*_~`]/g, '');
 
-                const [_, prefix, number, petugas, jenis, offset] = match;
-                const config = sheetsConfig[prefix.toUpperCase()];
-                if (!config?.webhook) continue;
+                // 1. Cek format standar: [PREFIX] [NOMOR] [PETUGAS] SA [OFFSET?]
+                const match = line.match(/\b([A-Z]{2,3})\s(\d{1,5})\s+([a-zA-Z\/]+)\s+(SA)(?:\s+(\d+))?$/i);
+                if (match) {
+                    const [_, prefix, number, petugas, jenis, offset] = match;
+                    const config = sheetsConfig[prefix.toUpperCase()];
+                    if (!config?.webhook) continue;
 
-                if (jenis.toUpperCase() === 'SA') {
+                    if (jenis.toUpperCase() === 'SA') {
+                        try {
+                            const payload = {
+                                kode: `${prefix.toUpperCase()} ${number}`,
+                                sheet: config.sheet,
+                                timestamp: getTimestamp(),
+                                kolom: config.kolom_cs,
+                                kolom_petugas: config.kolom_petugas_cs,
+                                petugas,
+                                offset: offset || 0
+                            };
+                            const result = await callDataSink('CSM', config, payload);
+                            if (result.success) {
+                                recordRekapEvent({
+                                    prefix,
+                                    number,
+                                    kode: `${prefix.toUpperCase()} ${number}`,
+                                    divisi: 'CSM',
+                                    subDivisi: 'SA',
+                                    petugas,
+                                    groupName,
+                                    rawLine,
+                                    timestamp: payload.timestamp
+                                });
+                                await safeReact(sock, from, msg.key, '🎀');
+                            }
+                        } catch (err) {
+                            console.error('Error Datasink CSM:', err.message);
+                        }
+                    }
+                    continue;
+                }
+
+                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] (SA|ACC) [OFFSET?]
+                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+)\s+(SA|ACC)(?:\s+(\d+))?$/i);
+                if (shopeeMatch) {
+                    const [_, orderNumber, petugas, jenis, offset] = shopeeMatch;
+                    const config = sheetsConfig['PRISMATICA'];
+                    if (!config?.webhook) continue;
+
                     try {
                         const payload = {
-                            kode: `${prefix.toUpperCase()} ${number}`,
+                            kode: orderNumber.toUpperCase(),
                             sheet: config.sheet,
                             timestamp: getTimestamp(),
-                            kolom: config.kolom_cs,
-                            kolom_petugas: config.kolom_petugas_cs,
+                            kolom: config.kolom_cs || 9,
+                            kolom_petugas: config.kolom_petugas_cs || 10,
                             petugas,
                             offset: offset || 0
                         };
                         const result = await callDataSink('CSM', config, payload);
                         if (result.success) {
                             recordRekapEvent({
-                                prefix,
-                                number,
-                                kode: `${prefix.toUpperCase()} ${number}`,
+                                prefix: 'PRISMATICA',
+                                number: orderNumber,
+                                kode: orderNumber.toUpperCase(),
                                 divisi: 'CSM',
-                                subDivisi: 'SA',
+                                subDivisi: jenis.toUpperCase(),
                                 petugas,
                                 groupName,
-                                rawLine: line,
+                                rawLine,
                                 timestamp: payload.timestamp
                             });
                             await safeReact(sock, from, msg.key, '🎀');
                         }
                     } catch (err) {
-                        console.error('Error Datasink CSM:', err.message);
+                        console.error('Error Datasink CSM Shopee:', err.message);
                     }
                 }
             }
@@ -1454,57 +1610,112 @@ async function connectToWhatsApp() {
             return;
         }
 
-        for (const line of lines) {
-            const clean = line.trim().replace(/[*_~`]/g, '');
+        for (const rawLine of lines) {
+            const clean = rawLine.trim().replace(/[*_~`]/g, '');
+
+            // 1. Cek format standar: [PREFIX] [NOMOR] [FIX_CODE?] [PETUGAS?]
             const match = clean.match(/\b([A-Z]{2,3})\s(\d{1,5})(?:\s([1-4]))?(?:\s+([a-zA-Z\/]+))?$/i);
-            if (!match) continue;
+            if (match) {
+                const [_, prefix, number, kodeFix, namaPetugas] = match;
+                const config = sheetsConfig[prefix.toUpperCase()];
+                if (!config?.webhook) continue;
+                const kode = `${prefix.toUpperCase()} ${number}`;
 
-            const [_, prefix, number, kodeFix, namaPetugas] = match;
-            const config = sheetsConfig[prefix.toUpperCase()];
-            if (!config?.webhook) continue;
-            const kode = `${prefix.toUpperCase()} ${number}`;
+                const { day, month, hour, minute } = getJakartaDateParts();
 
-            const { day, month, hour, minute } = getJakartaDateParts();
+                let timestamp;
+                let kolomTarget;
 
-            let timestamp;
-            let kolomTarget;
+                if (kodeFix && FIXED_TIMES[kodeFix]) {
+                    timestamp = `${day}/${month}/ ${FIXED_TIMES[kodeFix]}`;
+                    kolomTarget = config.kolom_fix;
+                } else {
+                    timestamp = `${day}/${month}/ ${hour}.${minute}`;
+                    kolomTarget = config.kolom;
+                }
 
-            if (kodeFix && FIXED_TIMES[kodeFix]) {
-                timestamp = `${day}/${month}/ ${FIXED_TIMES[kodeFix]}`;
-                kolomTarget = config.kolom_fix;
-            } else {
-                timestamp = `${day}/${month}/ ${hour}.${minute}`;
-                kolomTarget = config.kolom;
+                try {
+                    const payload = {
+                        kode,
+                        sheet: config.sheet,
+                        timestamp,
+                        kolom: kolomTarget,
+                        ...(namaPetugas && config.kolom_petugas_desain && {
+                            namaPetugas,
+                            kolomNama: config.kolom_petugas_desain
+                        })
+                    };
+                    const result = await callDataSink('DESAIN', config, payload);
+                    if (result.success) {
+                        recordRekapEvent({
+                            prefix,
+                            number,
+                            kode,
+                            divisi: 'DESAIN',
+                            subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'DESAIN',
+                            petugas: namaPetugas,
+                            groupName,
+                            rawLine: rawLine,
+                            timestamp
+                        });
+                        await safeReact(sock, from, msg.key, '✅');
+                    }
+                } catch (err) {
+                    console.error('Error Datasink Desain:', err.message);
+                }
+                continue;
             }
 
-            try {
-                const payload = {
-                    kode,
-                    sheet: config.sheet,
-                    timestamp,
-                    kolom: kolomTarget,
-                    ...(namaPetugas && config.kolom_petugas_desain && {
-                        namaPetugas,
-                        kolomNama: config.kolom_petugas_desain
-                    })
-                };
-                const result = await callDataSink('DESAIN', config, payload);
-                if (result.success) {
-                    recordRekapEvent({
-                        prefix,
-                        number,
-                        kode,
-                        divisi: 'DESAIN',
-                        subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'DESAIN',
-                        petugas: namaPetugas,
-                        groupName,
-                        rawLine: line,
-                        timestamp
-                    });
-                    await safeReact(sock, from, msg.key, '✅');
+            // 2. Cek format Shopee: [NO_PESANAN] [FIX_CODE?] [PETUGAS?]
+            const shopeeMatch = clean.match(/^(\d{6}[A-Za-z0-9]{7,11})(?:\s([1-4]))?(?:\s+([a-zA-Z\/]+))?$/i);
+            if (shopeeMatch) {
+                const [_, orderNumber, kodeFix, namaPetugas] = shopeeMatch;
+                const config = sheetsConfig['PRISMATICA'];
+                if (!config?.webhook) continue;
+                const kode = orderNumber.toUpperCase();
+
+                const { day, month, hour, minute } = getJakartaDateParts();
+
+                let timestamp;
+                let kolomTarget;
+
+                if (kodeFix && FIXED_TIMES[kodeFix]) {
+                    timestamp = `${day}/${month}/ ${FIXED_TIMES[kodeFix]}`;
+                    kolomTarget = config.kolom_fix || 11;
+                } else {
+                    timestamp = `${day}/${month}/ ${hour}.${minute}`;
+                    kolomTarget = config.kolom || 11;
                 }
-            } catch (err) {
-                console.error('Error Datasink Desain:', err.message);
+
+                try {
+                    const payload = {
+                        kode,
+                        sheet: config.sheet,
+                        timestamp,
+                        kolom: kolomTarget,
+                        ...(namaPetugas && (config.kolom_petugas_desain || 12) && {
+                            namaPetugas,
+                            kolomNama: config.kolom_petugas_desain || 12
+                        })
+                    };
+                    const result = await callDataSink('DESAIN', config, payload);
+                    if (result.success) {
+                        recordRekapEvent({
+                            prefix: 'PRISMATICA',
+                            number: orderNumber,
+                            kode,
+                            divisi: 'DESAIN',
+                            subDivisi: kodeFix && FIXED_TIMES[kodeFix] ? 'FIX' : 'DESAIN',
+                            petugas: namaPetugas,
+                            groupName,
+                            rawLine: rawLine,
+                            timestamp
+                        });
+                        await safeReact(sock, from, msg.key, '✅');
+                    }
+                } catch (err) {
+                    console.error('Error Datasink Desain Shopee:', err.message);
+                }
             }
         }
     });
