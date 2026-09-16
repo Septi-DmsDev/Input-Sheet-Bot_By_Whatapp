@@ -1375,8 +1375,8 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
-                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] [OFFSET?]
-                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+(?:\s[a-zA-Z]+)*)(?:\s(\d+))?$/i);
+                // 2. Cek format Shopee: [NO_PESANAN / KODE_PENDEK] [PETUGAS] [OFFSET?]
+                const shopeeMatch = line.match(/^((?:\d{6}[A-Za-z0-9]{7,11})|[A-Za-z0-9]{4,8})\s+([a-zA-Z\/]+(?:\s[a-zA-Z]+)*)(?:\s(\d+))?$/i);
                 if (shopeeMatch) {
                     const [_, orderNumber, namaPetugas, extraNumber] = shopeeMatch;
                     const config = sheetsConfig['PRISMATICA'];
@@ -1473,8 +1473,8 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
-                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] [JENIS] [OFFSET?]
-                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+)\s+(CU|CP|PAC|PT|DR|FIN)(?:\s+(\d+))?$/i);
+                // 2. Cek format Shopee: [NO_PESANAN / KODE_PENDEK] [PETUGAS] [JENIS] [OFFSET?]
+                const shopeeMatch = line.match(/^((?:\d{6}[A-Za-z0-9]{7,11})|[A-Za-z0-9]{4,8})\s+([a-zA-Z\/]+)\s+(CU|CP|PAC|PT|DR|FIN)(?:\s+(\d+))?$/i);
                 if (shopeeMatch) {
                     const [_, orderNumber, petugas, jenis, offset] = shopeeMatch;
                     const config = sheetsConfig['PRISMATICA'];
@@ -1569,8 +1569,8 @@ async function connectToWhatsApp() {
                     continue;
                 }
 
-                // 2. Cek format Shopee: [NO_PESANAN] [PETUGAS] (SA|ACC) [OFFSET?]
-                const shopeeMatch = line.match(/^(\d{6}[A-Za-z0-9]{7,11})\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*)\s+(SA|ACC)(?:\s+(\d+))?$/i);
+                // 2. Cek format Shopee: [NO_PESANAN / KODE_PENDEK] [PETUGAS] (SA|ACC) [OFFSET?]
+                const shopeeMatch = line.match(/^((?:\d{6}[A-Za-z0-9]{7,11})|[A-Za-z0-9]{4,8})\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*)\s+(SA|ACC)(?:\s+(\d+))?$/i);
                 if (shopeeMatch) {
                     const [_, orderNumber, petugas, jenis, offset] = shopeeMatch;
                     const config = sheetsConfig['PRISMATICA'];
@@ -1670,8 +1670,8 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            // 2. Cek format Shopee: [NO_PESANAN] [FIX_CODE?] [PETUGAS?]
-            const shopeeMatch = clean.match(/^(\d{6}[A-Za-z0-9]{7,11})(?:\s+([1-4]))?(?:\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*))?$/i);
+            // 2. Cek format Shopee: [NO_PESANAN / KODE_PENDEK] [FIX_CODE?] [PETUGAS?]
+            const shopeeMatch = clean.match(/^((?:\d{6}[A-Za-z0-9]{7,11})|[A-Za-z0-9]{4,8})(?:\s+([1-4]))?(?:\s+([a-zA-Z\/]+(?:\s+[a-zA-Z\/]+)*))?$/i);
             if (shopeeMatch) {
                 const [_, orderNumber, kodeFix, namaPetugas] = shopeeMatch;
                 const config = sheetsConfig['PRISMATICA'];
