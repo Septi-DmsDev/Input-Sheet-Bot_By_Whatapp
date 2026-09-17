@@ -1076,13 +1076,21 @@ async function callDataSink(tag, config, payload) {
         payload.lookup_column = config.lookup_column;
     }
 
-    if (config?.spreadsheet_id && hasGoogleSheetsAuth()) {
-        console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=sheets_api`);
-        return callSheetsApi(tag, config, payload);
+    if (config?.mode === 'webhook' || !config?.spreadsheet_id || !hasGoogleSheetsAuth()) {
+        console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=webhook`);
+        return callWebhook(tag, config.webhook, payload);
     }
 
-    console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=webhook`);
-    return callWebhook(tag, config.webhook, payload);
+    console.log(`[DATASINK] tag=${tag} prefix=${payload?.sheet || config?.sheet || 'unknown'} mode=sheets_api`);
+    try {
+        return await callSheetsApi(tag, config, payload);
+    } catch (sheetsError) {
+        if (config?.webhook) {
+            console.warn(`[DATASINK] Sheets API gagal (${sheetsError.message}), beralih ke webhook...`);
+            return await callWebhook(tag, config.webhook, payload);
+        }
+        throw sheetsError;
+    }
 }
 
 async function callWebhook(tag, url, payload) {

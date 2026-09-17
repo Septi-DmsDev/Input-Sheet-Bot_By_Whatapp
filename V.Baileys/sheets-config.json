@@ -3,6 +3,7 @@
     "sheet": "Prismatica",
     "spreadsheet_id": "16FjffYCTJcA8d4bm4Mh-7XSvrkssX9vULKZYFLHrfA0",
     "webhook": "https://script.google.com/macros/s/AKfycbxvuXHfHchl_HiuuZRLUx3nD6h0j3Pji8ZlnWZpM7FzTX7fQgG9OgD205HXyQD76tUG/exec",
+    "mode": "webhook",
     "lookup_column": 2,
     "kolom_cs": 7,
     "kolom_petugas_cs": 8,
