@@ -6,6 +6,8 @@ function onOpen() {
   ui.createMenu('⚡ TEKNOS MENU')
     .addItem('🚀 Proses Semua Scanner', 'processBatchScanner')
     .addSeparator() // Garis pemisah visual
+    .addItem('🔄 Update Semua Status Checklist (Kolom J)', 'updateAllStatus')
+    .addSeparator()
     .addItem('🧹 1. Bersihkan Data Shopee (WAJIB)', 'clearDataShopee')
     .addToUi();
 }
@@ -290,7 +292,7 @@ function handleAutoTimestamp(e) {
     }
   }
 
-  var targetCols = [9, 11, 15, 17, 19, 21, 23, 25];
+  var targetCols = [7, 9, 11, 15, 17, 19, 21, 23, 25];
   if (targetCols.indexOf(col) > -1) {
     var cellVal = range.getValue();
     if (cellVal === "," || cellVal === ".") {
@@ -298,7 +300,8 @@ function handleAutoTimestamp(e) {
     }
   }
 
-  if (col === 9 || col === 11) {
+  // Trigger status checklist APO Maharatu di Kolom J (berdasarkan Kolom 7 / G dan Kolom 9 / I)
+  if (col === 7 || col === 9) {
     updateStatus(sheet, row);
   }
 
@@ -376,8 +379,8 @@ function doPost(e) {
         targetSheet.getRange(rowToUpdate, kolomNama).setValue(namaPetugas);
       }
 
-      // Hanya jalankan auto-status pada sheet reguler (di mana lookupColumn == 1)
-      if ((kolom === 11 || kolom === 9) && lookupColumn === 1 && targetSheet.getName() !== 'Prismatica') {
+      // Jalankan auto-status APO Maharatu jika kolom yang diupdate adalah Kolom G (7) atau Kolom I (9)
+      if (kolom === 7 || kolom === 9) {
         updateStatus(targetSheet, rowToUpdate);
       }
 
@@ -392,74 +395,77 @@ function doPost(e) {
 }
 
 function updateStatus(sheet, row) {
-  var startTimeCell = sheet.getRange(row, 9).getValue(); 
-  var endTimeCell = sheet.getRange(row, 11).getValue();  
-  var statusCell = sheet.getRange(row, 12);              
+  var startTimeCell = sheet.getRange(row, 7).getValue(); // Kolom G (Job Masuk / CS)
+  var endTimeCell = sheet.getRange(row, 9).getValue();   // Kolom I (ACC Pertama)
+  var statusCell = sheet.getRange(row, 10);              // Kolom J (Status Checklist)
 
-  var formattedI = parseCustomDate(startTimeCell);
-  var formattedK = parseCustomDate(endTimeCell);
+  var formattedG = parseCustomDate(startTimeCell);
+  var formattedI = parseCustomDate(endTimeCell);
 
-  if (formattedI && formattedK) {
-    var timeDiff = (formattedK - formattedI) / (1000 * 60 * 60); 
+  if (formattedG && formattedI) {
+    var timeDiff = (formattedI.getTime() - formattedG.getTime()) / (1000 * 60 * 60); 
     if (timeDiff > 6) {
       statusCell.setValue("❌").setBackground("#FF0000").setFontColor("#FFFFFF");
     } else {
       statusCell.setValue("✅").setBackground("#00FF00").setFontColor("#000000");
     }
   } else {
-    const colStatus = 11;
-    const val = sheet.getRange(row, colStatus).getValue();
-    if (!val || val === '') {
-      sheet.getRange(row, colStatus).setValue('✅');
-    }
+    // Jika salah satu atau keduanya belum terisi tanggal & jam, jangan beri centang/silang
+    statusCell.setValue("").setBackground("#FFFFFF").setFontColor("#000000");
   }
 }
-
-// function updateStatusAA(sheet, row) {
-//   var colM = sheet.getRange(row, 13).getValue(); 
-//   var colY = sheet.getRange(row, 25).getValue(); 
-//   var statusCell = sheet.getRange(row, 27);      
-
-//   if (!(colM instanceof Date)) colM = parseCustomDate(colM);
-//   if (!(colY instanceof Date)) colY = parseCustomDate(colY);
-
-//   if (colM instanceof Date && colY instanceof Date) {
-//     var selisihHari = Math.floor((colY - colM) / (1000 * 60 * 60 * 24));
-
-//     if (selisihHari > 3) {
-//       statusCell.setValue("❌").setBackground("#FF0000").setFontColor("#FFFFFF");
-//     } else {
-//       statusCell.setValue("✅").setBackground("#00FF00").setFontColor("#000000");
-//     }
-//   } else {
-//     statusCell.setValue("").setBackground("#FFFFFF").setFontColor("#000000");
-//   }
-// }
 
 function parseCustomDate(inputValue) {
   if (!inputValue) return null;
-  var tahunSekarang = new Date().getFullYear();
-  inputValue = inputValue.toString().replace(",", "."); 
-  var regex = /^(\d{2})\/(\d{2})\/ (\d{2})\.(\d{2})$/;
-  var match = inputValue.match(regex);
+  if (inputValue instanceof Date) return inputValue;
 
-  if (match) {
-    var day = parseInt(match[1], 10);
-    var month = parseInt(match[2], 10) - 1;
-    var hour = parseInt(match[3], 10);
-    var minute = parseInt(match[4], 10);
+  var tahunSekarang = new Date().getFullYear();
+  var str = inputValue.toString().trim().replace(",", "."); 
+  
+  // Format: dd/MM/ HH.mm atau dd/MM/ HH:mm (contoh: 17/09/ 07.56)
+  var regex1 = /^(\d{1,2})\/(\d{1,2})\/\s*(\d{1,2})[.:](\d{2})$/;
+  var match1 = str.match(regex1);
+  if (match1) {
+    var day = parseInt(match1[1], 10);
+    var month = parseInt(match1[2], 10) - 1;
+    var hour = parseInt(match1[3], 10);
+    var minute = parseInt(match1[4], 10);
     return new Date(tahunSekarang, month, day, hour, minute);
   }
+
+  // Format: dd/MM/yy HH.mm atau dd/MM/yyyy HH.mm
+  var regex2 = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2})[.:](\d{2})$/;
+  var match2 = str.match(regex2);
+  if (match2) {
+    var day = parseInt(match2[1], 10);
+    var month = parseInt(match2[2], 10) - 1;
+    var year = parseInt(match2[3], 10);
+    if (year < 100) year += 2000;
+    var hour = parseInt(match2[4], 10);
+    var minute = parseInt(match2[5], 10);
+    return new Date(year, month, day, hour, minute);
+  }
+
+  // Fallback standar Date
+  var parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
   return null;
 }
 
-function updateAllStatusAA() {
+function updateAllStatus() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
 
+  var count = 0;
   for (let i = 2; i <= lastRow; i++) {
-    updateStatusAA(sheet, i);
+    updateStatus(sheet, i);
+    count++;
   }
+  SpreadsheetApp.getActiveSpreadsheet().toast(`Berhasil update status untuk ${count} baris.`, "SUKSES", 5);
 }
 
 function doGet(e) {

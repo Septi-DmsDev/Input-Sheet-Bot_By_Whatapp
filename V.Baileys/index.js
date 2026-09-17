@@ -1482,7 +1482,7 @@ async function connectToWhatsApp() {
 
                     const mappingShopee = {
                         CP: { tgl: config.kolom_cheker_paket || 19, ptg: config.kolom_petugas_cheker_paket || 20, emo: '📝' },
-                        PAC: { tgl: config.kolom_cheker_packing || 21, ptg: null, emo: '📦' },
+                        PAC: { tgl: config.kolom_cheker_packing || 21, ptg: config.kolom_petugas_cheker_packing || 22, emo: '📦' },
                         FIN: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🪓' },
                         PT: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🪓' },
                         CU: { tgl: config.kolom_finishing || 17, ptg: config.kolom_petugas_finishing || 18, emo: '🗒️' },
@@ -1578,7 +1578,7 @@ async function connectToWhatsApp() {
 
                     const isAcc = jenis.toUpperCase() === 'ACC';
                     const targetKolom = isAcc ? (config.kolom || 9) : (config.kolom_cs || 7);
-                    const targetKolomPetugas = isAcc ? (config.kolom_petugas || 10) : (config.kolom_petugas_cs || 8);
+                    const targetKolomPetugas = isAcc ? (config.kolom_petugas || null) : (config.kolom_petugas_cs || 8);
 
                     try {
                         const payload = {
@@ -1693,7 +1693,7 @@ async function connectToWhatsApp() {
                     // ACC Pertama (misal: 26091425CGHYKM test) -> Masuk ACC Pertama
                     timestamp = `${day}/${month}/ ${hour}.${minute}`;
                     kolomTarget = config.kolom || 9;
-                    kolomNamaTarget = config.kolom_petugas || 10;
+                    kolomNamaTarget = config.kolom_petugas || null;
                 }
 
                 try {
